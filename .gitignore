@@ -1,0 +1,8 @@
+/.classpath
+/.project
+.idea
+/bin
+target
+/atlassian-jira.log
+*.iml
+*.log
