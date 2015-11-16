@@ -18,6 +18,7 @@ if (isEpic(issue)) {
         def Issue issueObj = (Issue)issueOfEpic
         def statusCategoryKey = getStatusCategoryKey(issueObj)
         if ("done".equals(statusCategoryKey)) {
+
             numberOfCompletedIssues++
         }
     }
