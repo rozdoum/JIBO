@@ -1,15 +1,18 @@
 import com.atlassian.jira.config.StatusCategoryManager
 import com.atlassian.jira.config.StatusManager
 import com.atlassian.jira.issue.status.Status
-import com.atlassian.jira.issue.status.category.StatusCategory
 import com.atlassian.jira.workflow.IssueWorkflowManager
 import com.opensymphony.workflow.loader.ActionDescriptor
-//import org.apache.log4j.Category
 import com.atlassian.jira.component.ComponentAccessor
 import com.atlassian.jira.issue.Issue
 import groovy.transform.Field
 import org.apache.log4j.LogManager
 
+
+@Field def String UNDEFINED = "undefined";
+@Field def String TO_DO = "new";
+@Field def String IN_PROGRESS = "indeterminate";
+@Field def String COMPLETE = "done";
 
 @Field def log = LogManager.getLogger("com.onstatuschange.jira.groovy.PostFunction")
 @Field def statusCategoryManager = ComponentAccessor.getComponent(StatusCategoryManager.class)
@@ -17,15 +20,13 @@ import org.apache.log4j.LogManager
 @Field def descriptor = transientVars.get("descriptor")
 @Field def epicLinkManager = getEpicLinkManager();
 @Field def Set statusSet = new HashSet()
+@Field def Map<String, List> prioritySteps = getPrioritySteps()
+
 
 def Issue epic = getEpic((Issue)issue)
 if (epic != null) {
 
-    println("epic: " + epic)
-    println("transientVars: " + transientVars)
-    println("issueType: " + epic.issueType.name)
     println("status name: " + ((Issue)issue).getStatusObject().getName())
-    println("status id: " + ((Issue)issue).getStatusObject().getId())
 
     def issueKey = issue.getKey()
     def issuesOfEpic = epicLinkManager.getIssuesInEpic(epic)
@@ -34,7 +35,7 @@ if (epic != null) {
         def Issue issueObj = (Issue)issueOfEpic
         def statusCategoryKey
         if (issueObj.getKey().equals(issueKey)) {
-            def statusName = getNextStepName()
+            def statusName = getTargetStepName()
             statusCategoryKey = getStatusCategoryKey(statusName)
         } else {
             statusCategoryKey = getStatusCategoryKey(issueObj)
@@ -45,21 +46,45 @@ if (epic != null) {
 
     def String statusCategoryToSet;
     if (hasOnlyComplete()) {
-        statusCategoryToSet = StatusCategory.COMPLETE
+        statusCategoryToSet = COMPLETE
     } else if (hasOnlyToDo()) {
-        statusCategoryToSet = StatusCategory.TO_DO
+        statusCategoryToSet = TO_DO
     } else if (hasOnlyInProgress() || hasInProgress() || hasComplete()) {
-        statusCategoryToSet = StatusCategory.IN_PROGRESS
+        statusCategoryToSet = IN_PROGRESS
     }
 
     println("statusSet: " + statusSet)
     println("statusCategoryToSet: " + statusCategoryToSet)
 
-    setStatus(epic, statusCategoryToSet)
+    def currentStatus = getStatusCategoryKey(epic)
+    if (statusCategoryToSet.equals(currentStatus)) {
+
+        println("Epic has correct status - " + currentStatus + ". It will not be changed.")
+    } else {
+
+        def actionIdToSet = gerActionIdToSet(epic, statusCategoryToSet)
+        if (actionIdToSet == null) {
+
+            actionIdToSet = gerActionIdToSet(epic, TO_DO)
+            setStatus(epic, actionIdToSet)
+
+            actionIdToSet = gerActionIdToSet(epic, statusCategoryToSet)
+
+            if (actionIdToSet == null) {
+
+                println("---------- ERROR -------------------------")
+                println("Corresponding action wasn't found for statusCategory - " + statusCategoryToSet)
+                return
+            }
+        }
+
+        setStatus(epic, actionIdToSet)
+    }
 }
 return true
 
 
+////////////////////////////////////////////////////////////////////////////////////////////////
 
 
 def getEpicLinkManager() {
@@ -79,11 +104,8 @@ def getEpic(Issue issue) {
 
         def epicOption = epicLinkManager.getEpic(issue)
         if (epicOption.isDefined()) {
-
             epic = epicOption.get()
         } else {
-
-            log.info("Epic was not found.");
             println("Epic was not found.")
         }
     }
@@ -118,7 +140,7 @@ def getStatusCategoryKey(String statusName) {
     category.getKey();
 }
 
-def getNextStepName() {
+def getTargetStepName() {
 
     def actionId = transientVars.get("actionId")
     def action = descriptor.getAction(actionId)
@@ -132,37 +154,65 @@ def getStepName(action) {
     step.getName()
 }
 
-def setStatus(Issue issue, String statusCategoryToSet) {
+def gerActionIdToSet(Issue issue, String statusCategoryToSet) {
 
-    def currentStatus = getStatusCategoryKey(issue)
-    if (statusCategoryToSet.equals(currentStatus)) {
+    def IssueWorkflowManager issueWorkflowManager = ComponentAccessor.getComponentOfType(IssueWorkflowManager.class);
+    def Collection<ActionDescriptor> actions = issueWorkflowManager.getAvailableActions(issue);
 
-        log.info("Epic has correct status - " + currentStatus + ". It will not be changed.")
-        println("Epic has correct status - " + currentStatus + ". It will not be changed.")
-    } else {
+    printSctions(actions) //TODO: ONLY FOR DEBUG
 
-        def IssueWorkflowManager issueWorkflowManager = ComponentAccessor.getComponentOfType(IssueWorkflowManager.class);
-        def Collection<ActionDescriptor> actions = issueWorkflowManager.getAvailableActions(issue);
-        def Integer actionId
-        for (action in actions) {
+    def stepNameList = prioritySteps.get(statusCategoryToSet)
+    def Integer actionId = gerActionIdByStepName(stepNameList, actions)
 
-            def stepName = getStepName(action)
-            def key = getStatusCategoryKey(stepName)
-            if (statusCategoryToSet.equals(key)) {
-                actionId = action.getId()
-                break
-            }
-        }
-
-        if (actionId == null) {
-            log.error("Corresponding action wasn't found for statusCategory - " + statusCategoryToSet)
-            println("---------- ERROR -------------------------")
-            println("Corresponding action wasn't found for statusCategory - " + statusCategoryToSet)
-            return
-        }
-
-        setStatus(issue, actionId)
+    if(actionId == null) {
+        actionId = gerActionIdByCategory(actions, statusCategoryToSet)
     }
+
+    return actionId
+}
+
+def gerActionIdByCategory(actions, String statusCategoryToSet) {
+
+    def Integer actionId
+    for (action in actions) {
+
+        def stepName = getStepName(action)
+        def statusCategory = getStatusCategoryKey(stepName)
+        if (statusCategoryToSet.equals(statusCategory)) {
+
+            actionId = action.getId()
+            break
+        }
+    }
+
+    return actionId
+}
+
+def gerActionIdByStepName(stepNameList, actions) {
+
+    def Integer actionId
+    for (action in actions) {
+
+        def stepName = getStepName(action)
+        if (stepNameList.contains(stepName)) {
+
+            actionId = action.getId()
+            break
+        }
+    }
+
+    return actionId
+}
+
+def printSctions(actions) {
+    println("--------------------------------")
+    for (action in actions) {
+
+        def stepName = getStepName(action)
+        def key = getStatusCategoryKey(stepName)
+        println(stepName + "  (" + key + ")")
+    }
+    println("--------------------------------")
 }
 
 def setStatus(Issue issue, int actionId) {
@@ -171,15 +221,16 @@ def setStatus(Issue issue, int actionId) {
     def user = ComponentAccessor.getJiraAuthenticationContext().getLoggedInUser()
 
     def issueInputParameters = issueService.newIssueInputParameters()
-//    issueInputParameters.with {
-//        setResolutionId("1") // resolution of "Fixed"
-//        setComment("*Resolving* as a result of the *Resolve* action being applied to the parent.")
-//    }
+    /*issueInputParameters.with {
+        setResolutionId("1") // resolution of "Fixed"
+        setComment("*Resolving* as a result of the *Resolve* action being applied to the parent.")
+    }*/
 
+    def issueResult
     def validationResult = issueService.validateTransition(user, issue.id, actionId, issueInputParameters)
     if (validationResult.isValid()) {
 
-        def issueResult = issueService.transition(user, validationResult)
+        issueResult = issueService.transition(user, validationResult)
         if (!issueResult.isValid()) {
 
             log.warn("Failed to transition task ${issue.key}, errors: ${issueResult.errorCollection}")
@@ -188,6 +239,18 @@ def setStatus(Issue issue, int actionId) {
 
         log.warn("Could not transition task ${issue.key}, errors: ${validationResult.errorCollection}")
     }
+
+    return issueResult == null ? false : issueResult.isValid()
+}
+
+def getPrioritySteps() {
+
+    def prioritySteps = new HashMap()
+    prioritySteps.put(TO_DO, Arrays.asList("Open", "To Do"))
+    prioritySteps.put(IN_PROGRESS, Arrays.asList("In Progress"))
+    prioritySteps.put(COMPLETE, Arrays.asList("Resolved", "Done"))
+
+    return prioritySteps
 }
 
 def hasOnlyInProgress() {
@@ -195,7 +258,7 @@ def hasOnlyInProgress() {
 }
 
 def hasInProgress() {
-    statusSet.contains(StatusCategory.IN_PROGRESS)
+    statusSet.contains(IN_PROGRESS)
 }
 
 def hasOnlyToDo() {
@@ -203,7 +266,7 @@ def hasOnlyToDo() {
 }
 
 def hasToDo() {
-    statusSet.contains(StatusCategory.TO_DO)
+    statusSet.contains(TO_DO)
 }
 
 def hasOnlyComplete() {
@@ -211,7 +274,7 @@ def hasOnlyComplete() {
 }
 
 def hasComplete() {
-    statusSet.contains(StatusCategory.COMPLETE)
+    statusSet.contains(COMPLETE)
 }
 
 def hasOnlyOne() {
